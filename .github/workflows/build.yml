@@ -1,0 +1,162 @@
+name: 'Build Static SmartDNS'
+
+on:
+  workflow_dispatch:
+
+jobs:
+  Build:
+    name: 'Build for ${{ matrix.arch }}'
+    if: github.event.repository.owner.id == github.event.sender.id
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            bootlin_arch: x86-64
+            openssl_target: linux-x86_64
+          - arch: x86
+            bootlin_arch: x86-i686
+            openssl_target: linux-x86
+          - arch: aarch64
+            bootlin_arch: aarch64
+            openssl_target: linux-aarch64
+          - arch: armhf
+            bootlin_arch: armv7-eabihf
+            openssl_target: linux-armv4
+          - arch: armel
+            bootlin_arch: armv5-eabi
+            openssl_target: linux-armv4
+          - arch: mipsel
+            bootlin_arch: mips32el
+            openssl_target: linux-mips32
+          - arch: mips
+            bootlin_arch: mips32
+            openssl_target: linux-mips32
+
+    steps:
+      - name: 'Install Build Dependencies'
+        run: |
+          sudo -E apt-get update -qq
+          sudo -E apt-get -o 'Dpkg::Use-Pty=0' install -qqy --no-install-recommends build-essential curl wget tar linux-libc-dev unzip file jq git
+          sudo -E timedatectl set-timezone 'Asia/Shanghai'
+          sudo -E timedatectl set-ntp true
+          timedatectl status
+
+      - name: 'Download Source & Toolchain'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BOOTLIN_ARCH: ${{ matrix.bootlin_arch }}
+        run: |
+          git clone -q --depth 1 'https://github.com/pymumu/smartdns.git' smartdns
+          OPENSSL_LATEST=$(curl -sH "Authorization: Bearer ${GITHUB_TOKEN}" 'https://api.github.com/repos/openssl/openssl/releases' | jq -r '.[].tag_name' | grep -E '^openssl-3\.[4-9]' | head -n 1)
+          curl -fsSLo "${OPENSSL_LATEST}.tar.gz" "https://github.com/openssl/openssl/releases/download/${OPENSSL_LATEST}/${OPENSSL_LATEST}.tar.gz"
+          tar -zxf "${OPENSSL_LATEST}.tar.gz"
+          BASE_URL="https://toolchains.bootlin.com/downloads/releases/toolchains/${BOOTLIN_ARCH}/tarballs/"
+          LATEST_FILE=$(curl -sL "${BASE_URL}" | grep -oE '[a-zA-Z0-9_-]+--musl--stable-[0-9]{4}\.[0-9]{2}-[0-9]+\.tar\.(xz|bz2)' | sort -V | tail -n 1)
+          curl -fsSLo 'toolchain.archive' "${BASE_URL}${LATEST_FILE}"
+          if [[ "${LATEST_FILE}" == *.tar.xz ]]; then
+            tar -xJf 'toolchain.archive'
+            TOOLCHAIN_DIR="${LATEST_FILE%.tar.xz}"
+          else
+            tar -xjf 'toolchain.archive'
+            TOOLCHAIN_DIR="${LATEST_FILE%.tar.bz2}"
+          fi
+          GCC_PATH=$(find "${PWD}/${TOOLCHAIN_DIR}/bin" -name '*-gcc' | awk '{ print length, $0 }' | sort -n -s | cut -d' ' -f2- | head -n 1)
+          REAL_CROSS_PREFIX=$(basename "${GCC_PATH}" | sed 's/-gcc$//')
+          echo "OPENSSL_LATEST=${OPENSSL_LATEST}" >> ${GITHUB_ENV}
+          echo "${PWD}/${TOOLCHAIN_DIR}/bin" >> ${GITHUB_PATH}
+          echo "CROSS_PREFIX=${REAL_CROSS_PREFIX}" >> ${GITHUB_ENV}
+
+      - name: 'Compile OpenSSL'
+        working-directory: ${{ github.workspace }}/${{ env.OPENSSL_LATEST }}
+        env:
+          OPENSSL_TARGET: ${{ matrix.openssl_target }}
+          CROSS: ${{ env.CROSS_PREFIX }}
+          WORKSPACE: ${{ github.workspace }}
+        run: |
+          ./Configure ${OPENSSL_TARGET} no-shared no-async \
+            --cross-compile-prefix=${CROSS}- \
+            --prefix=${WORKSPACE}/openssl-static > /dev/null
+          make -s --no-print-directory -j$(nproc)
+          make install_sw -s --no-print-directory
+
+      - name: 'Compile SmartDNS'
+        working-directory: ${{ github.workspace }}/smartdns
+        env:
+          CC: ${{ env.CROSS_PREFIX }}-gcc
+          STRIP: ${{ env.CROSS_PREFIX }}-strip
+          CFLAGS: '-I${{ github.workspace }}/openssl-static/include -O3 -static -Wno-stringop-overflow'
+          LDFLAGS: '-L${{ github.workspace }}/openssl-static/lib -L${{ github.workspace }}/openssl-static/lib64 -static'
+        run: |
+          make clean -s
+          make -s --no-print-directory
+          ${STRIP} src/smartdns
+
+      - name: 'Extract & Verify'
+        working-directory: ${{ github.workspace }}
+        env:
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          mv -f 'smartdns/src/smartdns' "smartdns-${TARGET_ARCH}"
+          file "smartdns-${TARGET_ARCH}" | grep -q 'statically linked'
+
+      - name: 'Upload Artifact'
+        uses: actions/upload-artifact@main
+        with:
+          name: smartdns-${{ matrix.arch }}
+          path: smartdns-${{ matrix.arch }}
+
+  Release:
+    name: 'Create Release'
+    needs: Build
+    runs-on: ubuntu-latest
+    steps:
+      - name: 'Checkout Repo'
+        uses: actions/checkout@main
+        
+      - name: 'Download Artifacts'
+        uses: actions/download-artifact@main
+        with:
+          path: 'artifacts'
+          merge-multiple: true
+
+      - name: 'Create Tag'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RELEASE_TAG=$(curl -sH "Authorization: Bearer ${GITHUB_TOKEN}" 'https://api.github.com/repos/pymumu/smartdns/releases/latest' | jq -r '.tag_name')
+          OUTPUT_DATE=$(date +'%Y.%m.%d')
+          echo "RELEASE_TAG=${RELEASE_TAG}" >> ${GITHUB_ENV}
+          echo "OUTPUT_DATE=${OUTPUT_DATE}" >> ${GITHUB_ENV}
+
+      - name: 'Upload Release'
+        uses: ncipollo/release-action@main
+        with:
+          name: v${{ env.OUTPUT_DATE }}
+          token: ${{ secrets.GITHUB_TOKEN }}
+          tag: ${{ env.RELEASE_TAG }}
+          allowUpdates: true
+          removeArtifacts: true
+          makeLatest: true
+          artifacts: 'artifacts/*'
+          body: |
+            ### SmartDNS 静态编译版本
+            **编译特性：**
+            - 完全静态链接 (Musl libc) - 基于 Bootlin Toolchains (GCC 13+)
+            - 内置 `OpenSSL 3.4+` - 原生支持 DoQ (QUIC) / DoH3
+            ---
+            **架构说明：**
+            - `x86_64`: 现代软路由/服务器 | `x86`: 老旧 32 位 PC
+            - `aarch64`: 树莓派 4/5, RK35xx | `armhf`: IPQ40xx, BCM47xx
+            - `mipsel`: MT7621, K2P, AC2100 | `mips`: AR9344, QCA9531
+
+      - name: 'Delete Releases And Workflows Runs'
+        if: always()
+        uses: ophub/delete-releases-workflows@main
+        with:
+          delete_releases: true
+          releases_keep_latest: 5
+          delete_workflows: true
+          workflows_keep_day: 2
+          gh_token: ${{ secrets.GITHUB_TOKEN }}
