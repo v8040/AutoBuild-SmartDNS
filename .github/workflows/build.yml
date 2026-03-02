@@ -107,6 +107,70 @@ jobs:
           name: smartdns-${{ matrix.arch }}
           path: smartdns-${{ matrix.arch }}
 
+  Docker:
+    name: 'Build and Push Docker Image'
+    needs: Build
+    runs-on: ubuntu-latest
+    steps:
+    - name: 'Checkout'
+      uses: actions/checkout@main
+
+    - name: 'Download Artifacts'
+      uses: actions/download-artifact@main
+      with:
+        path: artifacts
+        merge-multiple: true
+
+    - name: 'Set up QEMU'
+      uses: docker/setup-qemu-action@master
+
+    - name: 'Set up Docker Buildx'
+      uses: docker/setup-buildx-action@master
+
+    - name: 'Login to Docker Hub'
+      uses: docker/login-action@master
+      with:
+        registry: docker.io
+        username: ${{ secrets.DOCKERHUB_USERNAME }}
+        password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+    - name: 'Login to GHCR'
+      uses: docker/login-action@master
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: 'Prepare Docker Context'
+      run: |
+        mkdir -p bin/{amd64,386,arm64,arm/v7} etc
+        for ITEM in 'x86_64:amd64' 'x86:386' 'aarch64:arm64' 'armhf:arm/v7'; do
+          SRC=${ITEM%:*}
+          DST=${ITEM#*:}
+          mv "artifacts/smartdns-${SRC}" "bin/${DST}/smartdns"
+        done
+        printf 'bind [::]:53\nlog-level info\n' > etc/smartdns.conf
+        chmod -R +x bin
+
+    - name: 'Extract metadata'
+      uses: docker/metadata-action@master
+      with:
+        images: |
+          docker.io/${{ secrets.DOCKERHUB_USERNAME }}/smartdns
+          ghcr.io/${{ github.repository_owner }}/smartdns
+        tags: |
+          type=raw,value=latest
+
+    - name: 'Build and push Docker image'
+      uses: docker/build-push-action@master
+      with:
+        context: .
+        file: ./Dockerfile
+        push: true
+        platforms: linux/amd64,linux/386,linux/arm64,linux/arm/v7
+        tags: ${{ env.DOCKER_METADATA_OUTPUT_TAGS }}
+        labels: ${{ env.DOCKER_METADATA_OUTPUT_LABELS }}
+
   Release:
     name: 'Create Release'
     needs: Build
