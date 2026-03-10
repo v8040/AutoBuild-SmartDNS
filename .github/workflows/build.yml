@@ -143,8 +143,8 @@ jobs:
 
     - name: 'Prepare Docker Context'
       run: |
-        mkdir -p bin/{amd64,386,arm64,arm/v7} etc
-        for ITEM in 'x86_64:amd64' 'x86:386' 'aarch64:arm64' 'armhf:arm/v7'; do
+        mkdir -p bin/{amd64,386,arm64,arm/{v5,v7}} etc
+        for ITEM in 'x86_64:amd64' 'x86:386' 'aarch64:arm64' 'armel:arm/v5' 'armhf:arm/v7'; do
           SRC=${ITEM%:*}
           DST=${ITEM#*:}
           mv "artifacts/smartdns-${SRC}" "bin/${DST}/smartdns"
@@ -167,7 +167,7 @@ jobs:
         context: .
         file: ./Dockerfile
         push: true
-        platforms: linux/amd64,linux/386,linux/arm64,linux/arm/v7
+        platforms: linux/amd64,linux/386,linux/arm64,linux/arm/v5,linux/arm/v7
         tags: ${{ env.DOCKER_METADATA_OUTPUT_TAGS }}
         labels: ${{ env.DOCKER_METADATA_OUTPUT_LABELS }}
 
@@ -213,6 +213,7 @@ jobs:
             **架构说明：**
             - `x86_64`: 现代软路由/服务器 | `x86`: 老旧 32 位 PC
             - `aarch64`: 树莓派 4/5, RK35xx | `armhf`: IPQ40xx, BCM47xx
+            - `armel`: 老旧 ARMv5 (如 MikroTik 新款 hEX S)
             - `mipsel`: MT7621, K2P, AC2100 | `mips`: AR9344, QCA9531
 
       - name: 'Delete Releases And Workflows Runs'

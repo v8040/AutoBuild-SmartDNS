@@ -1,9 +1,14 @@
-FROM alpine:latest
+FROM --platform=${BUILDPLATFORM} alpine:latest AS builder
+
+RUN apk add --no-cache ca-certificates tzdata
+
+FROM busybox:latest
 
 ARG TARGETARCH
 ARG TARGETVARIANT
 
-RUN apk add --no-cache ca-certificates tzdata
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo/
 
 COPY bin/${TARGETARCH}/${TARGETVARIANT}/smartdns /usr/sbin/smartdns
 COPY etc/smartdns.conf /etc/smartdns/smartdns.conf
